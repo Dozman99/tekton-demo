@@ -1,0 +1,219 @@
+---
+
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: toolkit
+  namespace: tekton-builds
+spec:
+  params:
+  - name: project
+    default: tekton-demo
+  - name: release
+    default: "1.0.1"
+  workspaces:
+    - name: pipeline-ws
+  tasks:
+  - name: git-clone
+    taskRef:
+      name: task-git-clone
+    workspaces: 
+    - name: source
+      workspace: pipeline-ws
+    params:
+    - name: url
+      value: git://github.com/dozman99/$(params.project)
+  - name: linting-test
+    taskRef:
+      name: task-echo
+    params:
+    - name: message
+      value: Running linting tests (Assuming no failure)...
+    runAfter:
+     - git-clone
+  - name: build-container-image
+    taskRef:
+      name: build-kaniko-git
+    params:
+    - name: app_repo
+      value: git://github.com/dozman99/$(params.project)
+    - name: container_image
+      value: dozman99/$(params.project)
+    - name: container_tag
+      value: "$(params.release)"
+    runAfter:
+     - git-clone
+     - linting-test
+  - name: deploy-staging
+    taskRef: 
+      name: helm-deploy
+    params:
+    - name: container_image
+      value: dozman99/$(params.project)
+    - name: container_tag
+      value: "$(params.release)"
+    - name: environment
+      value: staging
+    workspaces:
+    - name: source
+      workspace: pipeline-ws
+    runAfter:
+     - build-container-image
+     - git-clone
+  - name: integration-tests
+    taskRef:
+      name: task-echo
+    params:
+    - name: message
+      value: Running integration tests (after the staging deployment is finished)...
+    runAfter:
+     - deploy-staging
+  - name: deploy-production
+    taskRef:
+      name: helm-deploy
+    params:
+    - name: container_image
+      value: dozman99/$(params.project)
+    - name: container_tag
+      value: "$(params.release)"
+    - name: environment
+      value: prod
+    workspaces:
+    - name: source
+      workspace: pipeline-ws
+    runAfter:
+     - integration-tests
+     
+
+---
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-kaniko-git
+  namespace: tekton-builds
+spec:
+  params:
+  - name: app_repo
+  - name: container_image
+  - name: container_tag
+  volumes:
+  - name: kaniko-secret
+    secret:
+      secretName: regcred
+      items:
+      - key: .dockerconfigjson
+        path: config.json
+  steps:
+  - name: build
+    image: gcr.io/kaniko-project/executor:debug
+    args:
+    - --context=$(params.app_repo)
+    - --destination=$(params.container_image):$(params.container_tag)
+    volumeMounts:
+    - name: kaniko-secret
+      mountPath: /kaniko/.docker/
+
+---
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: task-echo
+  namespace: tekton-builds
+spec:
+  params:
+  - name: message
+    type: string
+  steps:
+  - name: sleep
+    image: alpine:latest
+    command: [echo]
+    args: ["$(params.message)"]
+
+---
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: helm-deploy
+  namespace: tekton-builds
+spec:
+  params:
+  - name: container_image
+    type: string
+  - name: container_tag
+    type: string
+  - name: environment
+    type: string
+  workspaces:
+  - name: source
+  steps:
+  - name: version
+    image: alpine/helm
+    script: |
+      cd $(workspaces.source.path)/$(params.project)
+      helm install tekton-demo ./helm_deploy --namespace $(params.environment) --set "stage.env=$(params.environment)" --set "stage.image=$(params.container_image)"
+
+---
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: task-git-clone
+  namespace: tekton-builds
+spec:
+  workspaces:
+  - name: source
+  params:
+  - name: url
+    type: string
+  steps:
+  - name: clone
+    image: bitnami/git
+    script: |
+      cd $(workspaces.source.path)
+      git clone $(params.url)
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipelines
+rules:
+  - apiGroups:
+      - "*"
+    resources:
+      - "*"
+    verbs:
+      - "*"
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pipelines
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pipelines
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: tekton-builds
+
+---
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+
+---
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging

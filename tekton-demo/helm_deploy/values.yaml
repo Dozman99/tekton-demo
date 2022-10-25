@@ -1,0 +1,3 @@
+stage: 
+    env: prod    # to set an environmental variable to either PROD or STAGING
+    image: dozman99/tekton-demo:latest    #set your image according to your directory
